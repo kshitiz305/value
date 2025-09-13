@@ -15,23 +15,39 @@ st.set_page_config(page_title="Valuation & DCF Dashboard", layout="wide")
 # -------------------------- #
 @st.cache_data(ttl=6*60*60, show_spinner=False)
 def fetch_all(ticker: str):
+    """
+    Return ONLY serializable objects so Streamlit's cache can pickle them safely.
+    Do NOT return the yfinance.Ticker object (it's not serializable).
+    """
     t = yf.Ticker(ticker)
-    info = t.info if hasattr(t, "info") else {}
-    fast = getattr(t, "fast_info", {}) or {}
-    hist = t.history(period="10y", auto_adjust=False)  # for charts
+    try:
+        info = t.info if hasattr(t, "info") else {}
+    except Exception:
+        info = {}
+    try:
+        fast = getattr(t, "fast_info", {}) or {}
+    except Exception:
+        fast = {}
+
+    try:
+        hist = t.history(period="10y", auto_adjust=False)
+    except Exception:
+        hist = pd.DataFrame()
+
     fin_a = t.financials if hasattr(t, "financials") and isinstance(t.financials, pd.DataFrame) else pd.DataFrame()
     fin_q = t.quarterly_financials if hasattr(t, "quarterly_financials") else pd.DataFrame()
     bs_a  = t.balance_sheet if hasattr(t, "balance_sheet") else pd.DataFrame()
     bs_q  = t.quarterly_balance_sheet if hasattr(t, "quarterly_balance_sheet") else pd.DataFrame()
     cf_a  = t.cashflow if hasattr(t, "cashflow") else pd.DataFrame()
     cf_q  = t.quarterly_cashflow if hasattr(t, "quarterly_cashflow") else pd.DataFrame()
-    return t, info, fast, hist, fin_a, fin_q, bs_a, bs_q, cf_a, cf_q
+
+    # Only serializable returns:
+    return info, fast, hist, fin_a, fin_q, bs_a, bs_q, cf_a, cf_q
 
 def _safe_get(df: pd.DataFrame, row_name: str):
     """Return series (across periods) for a row_name if present, else empty Series."""
     if df is None or df.empty:
         return pd.Series(dtype=float)
-    # yfinance uses rows as items and columns as dates
     candidates = [row_name,
                   row_name.lower(),
                   row_name.replace(" ", "_"),
@@ -40,7 +56,6 @@ def _safe_get(df: pd.DataFrame, row_name: str):
     for key in candidates:
         if key in df.index:
             return df.loc[key]
-    # fuzzy: try contains
     for idx in df.index:
         if row_name.lower() in str(idx).lower():
             return df.loc[idx]
@@ -104,7 +119,8 @@ st.write(
 if not ticker:
     st.stop()
 
-t, info, fast, hist, fin_a, fin_q, bs_a, bs_q, cf_a, cf_q = fetch_all(ticker)
+# Unpack the serializable returns
+info, fast, hist, fin_a, fin_q, bs_a, bs_q, cf_a, cf_q = fetch_all(ticker)
 
 company_name = info.get("longName") or info.get("shortName") or ticker
 sector = info.get("sector", "—")
@@ -119,7 +135,7 @@ colC.metric("Industry", industry)
 colD.metric("Reporting Currency", currency)
 
 # Price chart
-if not hist.empty:
+if isinstance(hist, pd.DataFrame) and not hist.empty and "Close" in hist.columns:
     price_fig = px.line(hist.reset_index(), x="Date", y="Close", title=f"{ticker} Price (10y)")
     st.plotly_chart(price_fig, use_container_width=True)
 else:
@@ -374,16 +390,24 @@ st.write(desc)
 st.header("📈 Comparables (User-Provided Peers)")
 def get_quick_snapshot(tix):
     t = yf.Ticker(tix)
-    info = t.info if hasattr(t, "info") else {}
-    fast = getattr(t, "fast_info", {}) or {}
+    try:
+        info = t.info if hasattr(t, "info") else {}
+    except Exception:
+        info = {}
+    try:
+        fast = getattr(t, "fast_info", {}) or {}
+    except Exception:
+        fast = {}
+
     fin_q = t.quarterly_financials if hasattr(t, "quarterly_financials") else pd.DataFrame()
     fin_a = t.financials if hasattr(t, "financials") else pd.DataFrame()
     bs_a = t.balance_sheet if hasattr(t, "balance_sheet") else pd.DataFrame()
+
     # Try TTM metrics
     rev = trailing_twelve_months(_safe_get(fin_q, "Total Revenue"))
     ni  = trailing_twelve_months(_safe_get(fin_q, "Net Income"))
     ebitda = trailing_twelve_months(_safe_get(fin_q, "Ebitda"))
-    if np.isnan(rev):  # fallback to last annual
+    if np.isnan(rev):
         rev = float(last_non_nan(_safe_get(fin_a, "Total Revenue")) or np.nan)
     if np.isnan(ni):
         ni = float(last_non_nan(_safe_get(fin_a, "Net Income")) or np.nan)
@@ -435,59 +459,63 @@ if peers:
             rows.append(get_quick_snapshot(p))
         except Exception:
             pass
-    comp_df = pd.DataFrame(rows).set_index("Ticker")
-    st.dataframe(comp_df.style.format({
-        "Price": "{:,.2f}",
-        "Market Cap": "{:,.0f}",
-        "EV": "{:,.0f}",
-        "Revenue (TTM)": "{:,.0f}",
-        "EBITDA (TTM)": "{:,.0f}",
-        "Net Income (TTM)": "{:,.0f}",
-        "P/E": "{:,.1f}",
-        "EV/EBITDA": "{:,.1f}",
-        "P/S": "{:,.1f}",
-    }), use_container_width=True)
+    if rows:
+        comp_df = pd.DataFrame(rows).set_index("Ticker")
+        st.dataframe(comp_df.style.format({
+            "Price": "{:,.2f}",
+            "Market Cap": "{:,.0f}",
+            "EV": "{:,.0f}",
+            "Revenue (TTM)": "{:,.0f}",
+            "EBITDA (TTM)": "{:,.0f}",
+            "Net Income (TTM)": "{:,.0f}",
+            "P/E": "{:,.1f}",
+            "EV/EBITDA": "{:,.1f}",
+            "P/S": "{:,.1f}",
+        }), use_container_width=True)
 
-    # Visualize multiples distribution
-    for metric in ["P/E", "EV/EBITDA", "P/S"]:
-        clean = comp_df[metric].dropna()
-        if not clean.empty:
-            fig = px.box(clean.reset_index(), x="Ticker", y=metric, title=f"{metric} by Ticker")
-            st.plotly_chart(fig, use_container_width=True)
+        # Visualize multiples distribution
+        for metric in ["P/E", "EV/EBITDA", "P/S"]:
+            clean = comp_df[metric].dropna()
+            if not clean.empty:
+                fig = px.box(clean.reset_index(), x="Ticker", y=metric, title=f"{metric} by Ticker")
+                st.plotly_chart(fig, use_container_width=True)
 
-    # Simple relative valuation (median peer multiple applied to company)
-    st.subheader("Peer-Implied Value (simple)")
-    try:
-        peer_only = comp_df.drop(index=ticker, errors="ignore")
-        med_pe = peer_only["P/E"].median(skipna=True)
-        med_ev_ebitda = peer_only["EV/EBITDA"].median(skipna=True)
-        med_ps = peer_only["P/S"].median(skipna=True)
+        # Simple relative valuation (median peer multiple applied to company)
+        st.subheader("Peer-Implied Value (simple)")
+        try:
+            peer_only = comp_df.drop(index=ticker, errors="ignore")
+            med_pe = peer_only["P/E"].median(skipna=True)
+            med_ev_ebitda = peer_only["EV/EBITDA"].median(skipna=True)
+            med_ps = peer_only["P/S"].median(skipna=True)
 
-        # Apply to the company
-        base = comp_df.loc[ticker]
-        implied_pe = (med_pe * base["Net Income (TTM)"]) if med_pe==med_pe else np.nan
-        implied_ev = (med_ev_ebitda * base["EBITDA (TTM)"]) if med_ev_ebitda==med_ev_ebitda else np.nan
-        implied_ps = (med_ps * base["Revenue (TTM)"]) if med_ps==med_ps else np.nan
+            # Apply to the company
+            base = comp_df.loc[ticker]
+            implied_pe = (med_pe * base["Net Income (TTM)"]) if med_pe==med_pe else np.nan
+            implied_ev = (med_ev_ebitda * base["EBITDA (TTM)"]) if med_ev_ebitda==med_ev_ebitda else np.nan
+            implied_ps = (med_ps * base["Revenue (TTM)"]) if med_ps==med_ps else np.nan
 
-        # Convert EV to equity (approx): EV - Net Debt
-        net_debt = float(base["EV"] - base["Market Cap"]) if base["EV"]==base["EV"] and base["Market Cap"]==base["Market Cap"] else np.nan
-        eq_from_ev = implied_ev - net_debt if implied_ev==implied_ev and net_debt==net_debt else np.nan
+            # Convert EV to equity (approx): EV - Net Debt
+            net_debt = float(base["EV"] - base["Market Cap"]) if base["EV"]==base["EV"] and base["Market Cap"]==base["Market Cap"] else np.nan
+            eq_from_ev = implied_ev - net_debt if implied_ev==implied_ev and net_debt==net_debt else np.nan
 
-        # Per share
-        if shares and shares > 0:
-            pe_ps = (implied_pe / shares) if implied_pe==implied_pe else np.nan
-            ev_ps = (eq_from_ev / shares) if eq_from_ev==eq_from_ev else np.nan
-            ps_ps = (implied_ps / shares) if implied_ps==implied_ps else np.nan
-        else:
-            pe_ps = ev_ps = ps_ps = np.nan
+            # Per share
+            shares_for_peer = info.get("sharesOutstanding") or fast.get("shares_outstanding")
+            if shares_for_peer and shares_for_peer > 0:
+                pe_ps = (implied_pe / shares_for_peer) if implied_pe==implied_pe else np.nan
+                ev_ps = (eq_from_ev / shares_for_peer) if eq_from_ev==eq_from_ev else np.nan
+                ps_ps = (implied_ps / shares_for_peer) if implied_ps==implied_ps else np.nan
+            else:
+                pe_ps = ev_ps = ps_ps = np.nan
 
-        k1, k2, k3 = st.columns(3)
-        k1.metric("P/E median implied Equity (per share)", f"{pe_ps:,.2f} {currency}" if pe_ps==pe_ps else "—")
-        k2.metric("EV/EBITDA median implied Equity (per share)", f"{ev_ps:,.2f} {currency}" if ev_ps==ev_ps else "—")
-        k3.metric("P/S median implied Equity (per share)", f"{ps_ps:,.2f} {currency}" if ps_ps==ps_ps else "—")
+            k1, k2, k3 = st.columns(3)
+            k1.metric("P/E median implied Equity (per share)", f"{pe_ps:,.2f} {currency}" if pe_ps==pe_ps else "—")
+            k2.metric("EV/EBITDA median implied Equity (per share)", f"{ev_ps:,.2f} {currency}" if ev_ps==ev_ps else "—")
+            k3.metric("P/S median implied Equity (per share)", f"{ps_ps:,.2f} {currency}" if ps_ps==ps_ps else "—")
 
-    except Exception:
-        st.info("Not enough peer data to compute implied values.")
+        except Exception:
+            st.info("Not enough peer data to compute implied values.")
+    else:
+        st.info("No peer data could be fetched.")
 else:
     st.info("Add peer tickers in the sidebar to enable comparables.")
 
