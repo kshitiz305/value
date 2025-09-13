@@ -6,106 +6,105 @@ import numpy as np
 import plotly.graph_objects as go
 from scipy.stats import norm
 
-st.set_page_config(page_title="Equity Valuation & DCF", layout="wide")
-
-st.title("Interactive Company Valuation Dashboard")
+st.set_page_config(page_title="Interactive DCF & Company Valuation", layout="wide")
+st.title("Equity Valuation & DCF Modeling Tool")
 
 # --- User Inputs ---
-ticker = st.text_input("Enter the company ticker", value="AAPL").upper()
+st.sidebar.header("Company & Forecast Inputs")
+ticker = st.sidebar.text_input("Company Ticker", value="AAPL").upper()
 company = yf.Ticker(ticker)
 
-st.subheader("Discount & Terminal Growth")
-default_wacc = 0.08  # Default WACC
-discount = st.slider("Discount rate / WACC (%)", 0.0, 30.0, float(default_wacc*100))/100
-terminal_growth = st.slider("Terminal Growth Rate (%)", -2.0, 6.0, 2.5)/100
+# Forecast Inputs
+years = st.sidebar.slider("Forecast Years", 3, 10, 5)
+default_wacc = 0.08
+wacc = st.sidebar.slider("Discount Rate / WACC (%)", 0.0, 30.0, float(default_wacc*100))/100
+terminal_growth = st.sidebar.slider("Terminal Growth Rate (%)", -2.0, 6.0, 2.5)/100
+fcf_growth_min = st.sidebar.slider("FCF Growth Min (%)", -10, 30, 5)/100
+fcf_growth_max = st.sidebar.slider("FCF Growth Max (%)", -10, 30, 10)/100
 
-st.subheader("Forecast Period")
-years = st.slider("Number of forecast years", 3, 10, 5)
-
-# --- Pull Financials ---
-with st.spinner("Fetching financial data..."):
+# --- Fetch Financial Data ---
+st.subheader(f"{ticker} Financial Data")
+with st.spinner("Fetching financial statements..."):
     try:
         income = company.financials.T
         balance = company.balance_sheet.T
         cashflow = company.cashflow.T
+        info = company.info
+        hist = company.history(period="5y")
     except:
         st.error("Could not fetch financial data. Check ticker symbol.")
         st.stop()
 
-# --- Display Financials ---
-st.subheader("Income Statement")
+st.markdown("### Income Statement")
 st.dataframe(income.style.format("{:,.0f}"), use_container_width=True)
-
-st.subheader("Balance Sheet")
+st.markdown("### Balance Sheet")
 st.dataframe(balance.style.format("{:,.0f}"), use_container_width=True)
-
-st.subheader("Cash Flow Statement")
+st.markdown("### Cash Flow Statement")
 st.dataframe(cashflow.style.format("{:,.0f}"), use_container_width=True)
-
-# --- Historical Data ---
-st.subheader("Historical Stock Data")
-hist = company.history(period="5y")
+st.markdown("### Historical Stock Price")
 st.line_chart(hist["Close"])
 
-# --- DCF Forecast ---
-st.subheader("DCF Forecast")
-last_fcf = cashflow['FreeCashFlow'][-1] if 'FreeCashFlow' in cashflow.columns else cashflow.iloc[-1].get('TotalCashFromOperatingActivities',0)
-growth_rates = st.slider("Expected FCF growth each year (%)", -10, 30, (5,10))
-growth_rates = [r/100 for r in growth_rates]
+# --- FCF Calculation ---
+st.subheader("Free Cash Flow Forecast")
+if 'TotalCashFromOperatingActivities' in cashflow.columns and 'CapitalExpenditures' in cashflow.columns:
+    last_fcf = cashflow['TotalCashFromOperatingActivities'][-1] - abs(cashflow['CapitalExpenditures'][-1])
+else:
+    last_fcf = cashflow.iloc[-1].get('TotalCashFromOperatingActivities',0)
 
 fcf_forecast = []
-prev = last_fcf
+prev_fcf = last_fcf
 for i in range(years):
-    prev = prev*(1+np.mean(growth_rates))
-    fcf_forecast.append(prev)
+    growth = np.random.uniform(fcf_growth_min, fcf_growth_max)
+    prev_fcf = prev_fcf*(1 + growth)
+    fcf_forecast.append(prev_fcf)
 
-dfc_df = pd.DataFrame({
-    "Year": range(1, years+1),
-    "Forecasted FCF": fcf_forecast
-})
-
+dfc_df = pd.DataFrame({"Year": range(1, years+1), "Forecasted FCF": fcf_forecast})
 st.dataframe(dfc_df.style.format("{:,.0f}"), use_container_width=True)
 
 # --- DCF Valuation ---
-discounted_fcf = [fcf / (1 + discount)**(i+1) for i, fcf in enumerate(fcf_forecast)]
-terminal_value = fcf_forecast[-1]*(1+terminal_growth)/ (discount - terminal_growth)
-terminal_value_discounted = terminal_value / (1 + discount)**years
+discounted_fcf = [fcf / (1 + wacc)**(i+1) for i, fcf in enumerate(fcf_forecast)]
+terminal_value = fcf_forecast[-1]*(1+terminal_growth)/(wacc - terminal_growth)
+terminal_value_discounted = terminal_value / (1 + wacc)**years
 dcf_value = sum(discounted_fcf) + terminal_value_discounted
 
-st.metric("DCF Equity Value", f"${dcf_value:,.0f}")
-
-# --- Comparables ---
-st.subheader("Comparable Companies")
-try:
-    comps = company.recommendations
-except:
-    comps = pd.DataFrame()
-
-if comps.empty:
-    st.info("No comparables available via Yahoo Finance. You can manually input tickers below.")
-else:
-    st.dataframe(comps, use_container_width=True)
-
-manual_comps = st.text_input("Enter additional comparable tickers (comma-separated)", value="MSFT,GOOGL,AMZN")
-manual_comps_list = [x.strip().upper() for x in manual_comps.split(",")]
-
-st.write("Manual comparables:", manual_comps_list)
+st.subheader("DCF Results")
+st.metric("Enterprise Value (DCF)", f"${dcf_value:,.0f}")
+st.write("Terminal Value (Discounted):", f"${terminal_value_discounted:,.0f}")
 
 # --- Interactive Plot ---
 st.subheader("DCF Visualization")
 fig = go.Figure()
 fig.add_trace(go.Bar(x=[f"Year {i+1}" for i in range(years)], y=discounted_fcf, name="Discounted FCF"))
 fig.add_trace(go.Bar(x=["Terminal"], y=[terminal_value_discounted], name="Terminal Value"))
-fig.update_layout(barmode='stack', title="DCF Components", yaxis_title="Value ($)")
+fig.update_layout(title=f"{ticker} DCF Components", barmode='stack', yaxis_title="Value ($)")
 st.plotly_chart(fig, use_container_width=True)
 
-# --- Options Greeks Example (Optional) ---
-st.subheader("Options Greeks (European Call)")
-S = st.number_input("Current Stock Price", value=float(hist["Close"][-1]))
+# --- Comparable Companies ---
+st.subheader("Comparable Companies Analysis")
+manual_comps = st.text_input("Enter comparable tickers (comma-separated)", value="MSFT,GOOGL,AMZN")
+manual_comps_list = [x.strip().upper() for x in manual_comps.split(",")]
+
+comp_data = []
+for comp in manual_comps_list:
+    try:
+        c = yf.Ticker(comp)
+        price = c.history(period="1d")['Close'][-1]
+        market_cap = c.info.get('marketCap', np.nan)
+        pe_ratio = c.info.get('trailingPE', np.nan)
+        pb_ratio = c.info.get('priceToBook', np.nan)
+        comp_data.append({"Ticker": comp, "Price": price, "Market Cap": market_cap, "P/E": pe_ratio, "P/B": pb_ratio})
+    except:
+        comp_data.append({"Ticker": comp, "Price": np.nan, "Market Cap": np.nan, "P/E": np.nan, "P/B": np.nan})
+
+st.dataframe(pd.DataFrame(comp_data).style.format({"Price":"${:,.2f}", "Market Cap":"${:,.0f}", "P/E":"{:.2f}", "P/B":"{:.2f}"}), use_container_width=True)
+
+# --- Optional: Options Greeks ---
+st.subheader("Options Greeks (European Call Example)")
+S = st.number_input("Stock Price", value=float(hist["Close"][-1]))
 K = st.number_input("Strike Price", value=S)
 T = st.number_input("Time to Expiration (years)", value=0.5)
-r = discount
 sigma = st.number_input("Volatility (%)", value=0.3)/100
+r = wacc
 
 d1 = (np.log(S/K) + (r + 0.5*sigma**2)*T)/(sigma*np.sqrt(T))
 d2 = d1 - sigma*np.sqrt(T)
@@ -118,3 +117,4 @@ rho = K*T*np.exp(-r*T)*norm.cdf(d2)
 
 st.write(f"Call Price: ${call_price:,.2f}")
 st.write(f"Delta: {delta:.4f}, Gamma: {gamma:.4f}, Vega: {vega:.4f}, Theta: {theta:.4f}, Rho: {rho:.4f}")
+
