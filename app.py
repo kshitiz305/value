@@ -13,27 +13,44 @@ st.set_page_config(page_title="Valuation & DCF Dashboard", layout="wide")
 # -------------------------- #
 #       UTILS / CACHING      #
 # -------------------------- #
-@st.cache_data(ttl=6*60*60, show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def fetch_all(ticker: str):
     """
-    Return ONLY serializable objects so Streamlit's cache can pickle them safely.
-    Do NOT return the yfinance.Ticker object (it's not serializable).
+    Use cache_resource to avoid pickling issues.
+    Return only plain-Python serializable items (dicts/DataFrames) and coerce fast_info to dict.
     """
     t = yf.Ticker(ticker)
+
+    # info can be a normal dict or cause network exceptions; guard it
     try:
         info = t.info if hasattr(t, "info") else {}
+        if not isinstance(info, dict):
+            # Some yfinance versions may return a Mapping-like; best effort to coerce
+            info = dict(info)
     except Exception:
         info = {}
+
+    # fast_info is often a custom object; force it to a dict
     try:
-        fast = getattr(t, "fast_info", {}) or {}
+        fi = getattr(t, "fast_info", {}) or {}
+        if isinstance(fi, dict):
+            fast = fi
+        elif hasattr(fi, "items"):
+            fast = dict(fi)
+        elif hasattr(fi, "__dict__"):
+            fast = dict(fi.__dict__)
+        else:
+            fast = {}
     except Exception:
         fast = {}
 
+    # History (DataFrame)
     try:
         hist = t.history(period="10y", auto_adjust=False)
     except Exception:
         hist = pd.DataFrame()
 
+    # Statements (DataFrames)
     fin_a = t.financials if hasattr(t, "financials") and isinstance(t.financials, pd.DataFrame) else pd.DataFrame()
     fin_q = t.quarterly_financials if hasattr(t, "quarterly_financials") else pd.DataFrame()
     bs_a  = t.balance_sheet if hasattr(t, "balance_sheet") else pd.DataFrame()
@@ -41,7 +58,6 @@ def fetch_all(ticker: str):
     cf_a  = t.cashflow if hasattr(t, "cashflow") else pd.DataFrame()
     cf_q  = t.quarterly_cashflow if hasattr(t, "quarterly_cashflow") else pd.DataFrame()
 
-    # Only serializable returns:
     return info, fast, hist, fin_a, fin_q, bs_a, bs_q, cf_a, cf_q
 
 def _safe_get(df: pd.DataFrame, row_name: str):
@@ -119,7 +135,6 @@ st.write(
 if not ticker:
     st.stop()
 
-# Unpack the serializable returns
 info, fast, hist, fin_a, fin_q, bs_a, bs_q, cf_a, cf_q = fetch_all(ticker)
 
 company_name = info.get("longName") or info.get("shortName") or ticker
@@ -391,13 +406,23 @@ st.header("📈 Comparables (User-Provided Peers)")
 def get_quick_snapshot(tix):
     t = yf.Ticker(tix)
     try:
-        info = t.info if hasattr(t, "info") else {}
+        inf = t.info if hasattr(t, "info") else {}
+        if not isinstance(inf, dict):
+            inf = dict(inf)
     except Exception:
-        info = {}
+        inf = {}
     try:
-        fast = getattr(t, "fast_info", {}) or {}
+        fi = getattr(t, "fast_info", {}) or {}
+        if isinstance(fi, dict):
+            fst = fi
+        elif hasattr(fi, "items"):
+            fst = dict(fi)
+        elif hasattr(fi, "__dict__"):
+            fst = dict(fi.__dict__)
+        else:
+            fst = {}
     except Exception:
-        fast = {}
+        fst = {}
 
     fin_q = t.quarterly_financials if hasattr(t, "quarterly_financials") else pd.DataFrame()
     fin_a = t.financials if hasattr(t, "financials") else pd.DataFrame()
@@ -415,13 +440,13 @@ def get_quick_snapshot(tix):
         ebitda = float(last_non_nan(_safe_get(fin_a, "Ebitda")) or np.nan)
 
     # Market data
-    mcap = info.get("marketCap") or fast.get("market_cap") or np.nan
-    price = fast.get("last_price") or info.get("currentPrice")
-    shares = info.get("sharesOutstanding") or fast.get("shares_outstanding")
+    mcap = inf.get("marketCap") or fst.get("market_cap") or np.nan
+    price = fst.get("last_price") or inf.get("currentPrice")
+    shares_local = inf.get("sharesOutstanding") or fst.get("shares_outstanding")
 
     # Debt/Cash for EV
     total_debt = 0.0
-    cash = 0.0
+    cash_local = 0.0
     if bs_a is not None and not bs_a.empty:
         for d in ["Total Debt", "Short Long Term Debt", "Short Long-Term Debt", "Long Term Debt", "Current Debt"]:
             s = _safe_get(bs_a, d)
@@ -430,9 +455,9 @@ def get_quick_snapshot(tix):
         for c in ["Cash", "Cash And Cash Equivalents", "Cash And Short Term Investments"]:
             s = _safe_get(bs_a, c)
             if not s.empty:
-                cash = float(last_non_nan(s))
+                cash_local = float(last_non_nan(s))
                 break
-    ev = (mcap or 0.0) + total_debt - cash
+    ev = (mcap or 0.0) + total_debt - cash_local
 
     # Multiples
     pe = (mcap / ni) if (mcap and ni and ni != 0) else np.nan
@@ -447,6 +472,7 @@ def get_quick_snapshot(tix):
         "Revenue (TTM)": rev,
         "EBITDA (TTM)": ebitda,
         "Net Income (TTM)": ni,
+        "Shares": shares_local,
         "P/E": pe,
         "EV/EBITDA": ev_ebitda,
         "P/S": ps
@@ -498,9 +524,9 @@ if peers:
             net_debt = float(base["EV"] - base["Market Cap"]) if base["EV"]==base["EV"] and base["Market Cap"]==base["Market Cap"] else np.nan
             eq_from_ev = implied_ev - net_debt if implied_ev==implied_ev and net_debt==net_debt else np.nan
 
-            # Per share
-            shares_for_peer = info.get("sharesOutstanding") or fast.get("shares_outstanding")
-            if shares_for_peer and shares_for_peer > 0:
+            # Per share (use the company's shares from comp table if present; else fall back to overall)
+            shares_for_peer = base.get("Shares", np.nan)
+            if isinstance(shares_for_peer, (int, float)) and shares_for_peer and shares_for_peer > 0:
                 pe_ps = (implied_pe / shares_for_peer) if implied_pe==implied_pe else np.nan
                 ev_ps = (eq_from_ev / shares_for_peer) if eq_from_ev==eq_from_ev else np.nan
                 ps_ps = (implied_ps / shares_for_peer) if implied_ps==implied_ps else np.nan
