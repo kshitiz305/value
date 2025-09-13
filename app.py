@@ -21,16 +21,15 @@ def fetch_all(ticker: str):
     """
     t = yf.Ticker(ticker)
 
-    # info can be a normal dict or cause network exceptions; guard it
+    # info
     try:
         info = t.info if hasattr(t, "info") else {}
         if not isinstance(info, dict):
-            # Some yfinance versions may return a Mapping-like; best effort to coerce
             info = dict(info)
     except Exception:
         info = {}
 
-    # fast_info is often a custom object; force it to a dict
+    # fast_info -> dict
     try:
         fi = getattr(t, "fast_info", {}) or {}
         if isinstance(fi, dict):
@@ -78,7 +77,7 @@ def _safe_get(df: pd.DataFrame, row_name: str):
     return pd.Series(dtype=float)
 
 def series_to_annual_df(s: pd.Series, label: str):
-    if s.empty:
+    if s is None or s.empty:
         return pd.DataFrame()
     out = pd.DataFrame({label: s})
     out.index.name = "Period"
@@ -93,11 +92,45 @@ def trailing_twelve_months(q_series: pd.Series, min_quarters=4):
         return np.nan
     return float(q_series.iloc[-4:].sum())
 
-def millions(x):  # helper for formatting
+def millions(x):
     try:
         return x / 1_000_000.0
     except Exception:
         return np.nan
+
+def format_for_display(df: pd.DataFrame, int_like: bool = True) -> pd.DataFrame:
+    """
+    Safely format a financial statement DataFrame into strings for display.
+    - Numbers become '1,234' (0 decimals). Others stay as text.
+    - Avoids Pandas Styler to prevent ValueErrors on mixed dtypes.
+    """
+    if df is None or df.empty:
+        return df
+
+    def fmt_cell(v):
+        try:
+            if pd.isna(v):
+                return ""
+            # If it's already numeric (incl. numpy types)
+            if isinstance(v, (int, float, np.integer, np.floating)) or np.issubdtype(type(v), np.number):
+                if int_like:
+                    return f"{float(v):,.0f}"
+                return f"{float(v):,.2f}"
+            # Try to coerce strings to number
+            v_num = pd.to_numeric(v)
+            if pd.isna(v_num):
+                return str(v)
+            if int_like:
+                return f"{float(v_num):,.0f}"
+            return f"{float(v_num):,.2f}"
+        except Exception:
+            return str(v)
+
+    # Work on a copy to avoid mutating original
+    df_disp = df.copy()
+    # yfinance returns statements with dates in columns; keep index as-is
+    # Ensure all columns are strings for display (preserve column names)
+    return df_disp.applymap(fmt_cell)
 
 # -------------------------- #
 #           SIDEBAR          #
@@ -167,13 +200,13 @@ def show_statement(name, annual_df, quarterly_df):
     with c1:
         if annual_df is not None and not annual_df.empty:
             st.caption("Annual")
-            st.dataframe(annual_df.fillna("").style.format("{:,.0f}"), use_container_width=True, height=360)
+            st.dataframe(format_for_display(annual_df), use_container_width=True, height=360)
         else:
             st.info("Annual data unavailable.")
     with c2:
         if quarterly_df is not None and not quarterly_df.empty:
             st.caption("Quarterly")
-            st.dataframe(quarterly_df.fillna("").style.format("{:,.0f}"), use_container_width=True, height=360)
+            st.dataframe(format_for_display(quarterly_df), use_container_width=True, height=360)
         else:
             st.info("Quarterly data unavailable.")
 
@@ -368,7 +401,7 @@ if fcfe_ttm==fcfe_ttm and shares:
     st.plotly_chart(fcfe_fig, use_container_width=True)
     st.plotly_chart(pv_fig, use_container_width=True)
 
-    # Sensitivity (heatmap) for Terminal g vs Cost of Equity
+    # Sensitivity (heatmap)
     tg_range = np.linspace(max(g_t-0.02, 0.0), g_t+0.02, 5)
     ke_range = np.linspace(max(ke-0.03, 0.06), min(ke+0.03, 0.20), 5)
     z = []
@@ -487,17 +520,9 @@ if peers:
             pass
     if rows:
         comp_df = pd.DataFrame(rows).set_index("Ticker")
-        st.dataframe(comp_df.style.format({
-            "Price": "{:,.2f}",
-            "Market Cap": "{:,.0f}",
-            "EV": "{:,.0f}",
-            "Revenue (TTM)": "{:,.0f}",
-            "EBITDA (TTM)": "{:,.0f}",
-            "Net Income (TTM)": "{:,.0f}",
-            "P/E": "{:,.1f}",
-            "EV/EBITDA": "{:,.1f}",
-            "P/S": "{:,.1f}",
-        }), use_container_width=True)
+        st.dataframe(comp_df.applymap(
+            lambda v: f"{v:,.2f}" if isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool) else v
+        ), use_container_width=True)
 
         # Visualize multiples distribution
         for metric in ["P/E", "EV/EBITDA", "P/S"]:
@@ -524,9 +549,9 @@ if peers:
             net_debt = float(base["EV"] - base["Market Cap"]) if base["EV"]==base["EV"] and base["Market Cap"]==base["Market Cap"] else np.nan
             eq_from_ev = implied_ev - net_debt if implied_ev==implied_ev and net_debt==net_debt else np.nan
 
-            # Per share (use the company's shares from comp table if present; else fall back to overall)
+            # Per share
             shares_for_peer = base.get("Shares", np.nan)
-            if isinstance(shares_for_peer, (int, float)) and shares_for_peer and shares_for_peer > 0:
+            if isinstance(shares_for_peer, (int, float, np.integer, np.floating)) and shares_for_peer and shares_for_peer > 0:
                 pe_ps = (implied_pe / shares_for_peer) if implied_pe==implied_pe else np.nan
                 ev_ps = (eq_from_ev / shares_for_peer) if eq_from_ev==eq_from_ev else np.nan
                 ps_ps = (implied_ps / shares_for_peer) if implied_ps==implied_ps else np.nan
