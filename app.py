@@ -165,7 +165,7 @@ def auto_peers_for_ticker(symbol: str, sector: str, industry: str, limit: int = 
                     if not s:
                         continue
                     qt = q.get("quoteType", "").upper()
-                    if qt in ("EQUITY", "ETF", "MUTUALFUND"):  # keep mostly equities
+                    if qt in ("EQUITY", "ETF", "MUTUALFUND"):
                         s = s.upper()
                         if TICKER_RE.match(s):
                             syms.append(s)
@@ -183,12 +183,11 @@ def auto_peers_for_ticker(symbol: str, sector: str, industry: str, limit: int = 
                     for s, dat in prof.items():
                         if isinstance(dat, dict) and str(dat.get("sector", "")).lower() == sec_lower:
                             same_ind.append(s)
-                # Clean-up: remove original symbol and obvious ETFs/mutuals by name check
                 peers = [s for s in same_ind if s != symbol][:limit]
     except Exception:
         peers = []
 
-    # Curated fallback for common industries
+    # Curated fallback
     if not peers:
         ind = (industry or "").lower()
         sec = (sector or "").lower()
@@ -216,10 +215,9 @@ def auto_peers_for_ticker(symbol: str, sector: str, industry: str, limit: int = 
         elif "energy" in sec:
             curated = ["XOM", "CVX", "COP", "SLB", "HAL"]
         else:
-            curated = ["MSFT", "GOOGL", "AMZN"]  # generic large-cap tech as last resort
+            curated = ["MSFT", "GOOGL", "AMZN"]
         peers = [p for p in curated if p != symbol][:limit]
 
-    # Basic cleanup
     peers = [p for p in peers if TICKER_RE.match(p)]
     return dedupe_keep_order(peers)
 
@@ -241,11 +239,22 @@ years_forecast = st.sidebar.slider("Forecast horizon (years)", 3, 10, 5)
 shares_override = st.sidebar.text_input("Shares Outstanding (override, in shares) [optional]:", value="")
 st.sidebar.markdown("---")
 st.sidebar.caption("Tip: Add custom tickers in the Comparables section to refine peer set.")
+st.sidebar.markdown(
+    '[👤 Built by **Navjot Dhah**](https://www.linkedin.com/in/navjot-dhah-57870b238)',
+    unsafe_allow_html=True
+)
 
 # -------------------------- #
 #         MAIN HEADER        #
 # -------------------------- #
-st.title("📊 Valuation & Comparable Automation")
+st.title("📊 Company Analyzer & Valuation (Streamlit)")
+# Top-right credit with LinkedIn
+st.markdown(
+    '<div style="text-align:right;">'
+    'Built by <a href="https://www.linkedin.com/in/navjot-dhah-57870b238" target="_blank">Navjot Dhah</a>'
+    '</div>',
+    unsafe_allow_html=True
+)
 st.write(
     "Enter a ticker on the left, then explore financial statements, business overview, ratios, a detailed DCF, "
     "and comparables vs peers. Data source: Yahoo Finance via `yfinance`."
@@ -466,10 +475,9 @@ if fcfe_ttm==fcfe_ttm and shares:
     proj = project_fcfe(fcfe_ttm, start_fcfe_growth, years_forecast)
     # Terminal value (Gordon on Year N FCFE)
     g_t = terminal_growth/100.0
-    ke = max(cost_equity, g_t + 0.0001)  # avoid div by zero/negative spread
+    ke = max(cost_equity, g_t + 0.0001)
     tv = proj[-1] * (1.0 + g_t) / (ke - g_t)
 
-    # Discount factors
     years = np.arange(1, years_forecast+1)
     disc = 1.0 / (1.0 + ke)**years
     pv_cf = (np.array(proj) * disc).sum()
@@ -483,14 +491,12 @@ if fcfe_ttm==fcfe_ttm and shares:
     c3.metric("Equity Value", f"{equity_value:,.0f} {currency}")
     c4.metric("Intrinsic Value / Share", f"{intrinsic_ps:,.2f} {currency}")
 
-    # Plots
     df_proj = pd.DataFrame({"Year": years, "FCFE": proj, "Discount Factor": disc, "PV": np.array(proj)*disc})
     fcfe_fig = px.bar(df_proj, x="Year", y="FCFE", title="Projected FCFE")
     pv_fig = px.bar(df_proj, x="Year", y="PV", title="Present Value of FCFE")
     st.plotly_chart(fcfe_fig, use_container_width=True)
     st.plotly_chart(pv_fig, use_container_width=True)
 
-    # Sensitivity (heatmap)
     tg_range = np.linspace(max(g_t-0.02, 0.0), g_t+0.02, 5)
     ke_range = np.linspace(max(ke-0.03, 0.06), min(ke+0.03, 0.20), 5)
     z = []
@@ -647,17 +653,14 @@ if peers:
             med_ev_ebitda = peer_only["EV/EBITDA"].median(skipna=True)
             med_ps = peer_only["P/S"].median(skipna=True)
 
-            # Apply to the company
             base = comp_df.loc[ticker]
             implied_pe = (med_pe * base["Net Income (TTM)"]) if med_pe==med_pe else np.nan
             implied_ev = (med_ev_ebitda * base["EBITDA (TTM)"]) if med_ev_ebitda==med_ev_ebitda else np.nan
             implied_ps = (med_ps * base["Revenue (TTM)"]) if med_ps==med_ps else np.nan
 
-            # Convert EV to equity (approx): EV - Net Debt
             net_debt = float(base["EV"] - base["Market Cap"]) if base["EV"]==base["EV"] and base["Market Cap"]==base["Market Cap"] else np.nan
             eq_from_ev = implied_ev - net_debt if implied_ev==implied_ev and net_debt==net_debt else np.nan
 
-            # Per share
             shares_for_peer = base.get("Shares", np.nan)
             if isinstance(shares_for_peer, (int, float, np.integer, np.floating)) and shares_for_peer and shares_for_peer > 0:
                 pe_ps = (implied_pe / shares_for_peer) if implied_pe==implied_pe else np.nan
