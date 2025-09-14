@@ -4,6 +4,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import yfinance as yf
+import re
 
 # -------------------------- #
 #           CONFIG           #
@@ -111,34 +112,122 @@ def format_for_display(df: pd.DataFrame, int_like: bool = True) -> pd.DataFrame:
         try:
             if pd.isna(v):
                 return ""
-            # If it's already numeric (incl. numpy types)
-            if isinstance(v, (int, float, np.integer, np.floating)) or np.issubdtype(type(v), np.number):
-                if int_like:
-                    return f"{float(v):,.0f}"
-                return f"{float(v):,.2f}"
-            # Try to coerce strings to number
+            if isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool):
+                return f"{float(v):,.0f}" if int_like else f"{float(v):,.2f}"
             v_num = pd.to_numeric(v)
             if pd.isna(v_num):
                 return str(v)
-            if int_like:
-                return f"{float(v_num):,.0f}"
-            return f"{float(v_num):,.2f}"
+            return f"{float(v_num):,.0f}" if int_like else f"{float(v_num):,.2f}"
         except Exception:
             return str(v)
 
-    # Work on a copy to avoid mutating original
-    df_disp = df.copy()
-    # yfinance returns statements with dates in columns; keep index as-is
-    # Ensure all columns are strings for display (preserve column names)
-    return df_disp.applymap(fmt_cell)
+    return df.copy().applymap(fmt_cell)
+
+def dedupe_keep_order(seq):
+    seen = set()
+    out = []
+    for x in seq:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+TICKER_RE = re.compile(r"^[A-Z.\-]{1,10}$")
+
+def parse_manual_peers(text: str):
+    if not text:
+        return []
+    raw = [p.strip().upper() for p in text.split(",") if p.strip()]
+    return [p for p in raw if TICKER_RE.match(p)]
+
+# ---------- Auto Peer Discovery (yahooquery + curated fallback) ----------
+@st.cache_resource(show_spinner=False)
+def auto_peers_for_ticker(symbol: str, sector: str, industry: str, limit: int = 12):
+    """
+    Try to discover peers automatically:
+    1) Use yahooquery.search + asset_profile to filter same industry/sector.
+    2) Fall back to curated mapping by industry keywords.
+    """
+    peers = []
+
+    # Try yahooquery if available
+    try:
+        from yahooquery import search as yq_search
+        from yahooquery import Ticker as YQTicker
+
+        query_term = industry or sector or symbol
+        if query_term:
+            res = yq_search(query_term, first=60)
+            syms = []
+            if isinstance(res, dict) and "quotes" in res:
+                for q in res["quotes"]:
+                    s = q.get("symbol")
+                    if not s:
+                        continue
+                    qt = q.get("quoteType", "").upper()
+                    if qt in ("EQUITY", "ETF", "MUTUALFUND"):  # keep mostly equities
+                        s = s.upper()
+                        if TICKER_RE.match(s):
+                            syms.append(s)
+            if syms:
+                yq = YQTicker(list(set(syms[:120])), asynchronous=True)
+                prof = yq.asset_profile
+                same_ind = []
+                if industry:
+                    ind_lower = industry.lower()
+                    for s, dat in prof.items():
+                        if isinstance(dat, dict) and str(dat.get("industry", "")).lower() == ind_lower:
+                            same_ind.append(s)
+                if not same_ind and sector:
+                    sec_lower = sector.lower()
+                    for s, dat in prof.items():
+                        if isinstance(dat, dict) and str(dat.get("sector", "")).lower() == sec_lower:
+                            same_ind.append(s)
+                # Clean-up: remove original symbol and obvious ETFs/mutuals by name check
+                peers = [s for s in same_ind if s != symbol][:limit]
+    except Exception:
+        peers = []
+
+    # Curated fallback for common industries
+    if not peers:
+        ind = (industry or "").lower()
+        sec = (sector or "").lower()
+        curated = []
+        if ("casino" in ind) or ("gaming" in ind):
+            curated = ["MGM", "LVS", "CZR", "MLCO", "PENN", "BALY"]
+        elif "hotels" in ind or "resorts" in ind or "lodging" in ind:
+            curated = ["MAR", "HLT", "H", "IHG", "HGV"]
+        elif "semiconductor" in ind:
+            curated = ["NVDA", "AMD", "INTC", "AVGO", "QCOM", "TXN", "MU"]
+        elif "software" in ind:
+            curated = ["MSFT", "ADBE", "CRM", "ORCL", "NOW", "INTU"]
+        elif "consumer electronics" in ind or "hardware" in ind:
+            curated = ["AAPL", "HPQ", "DELL", "SSNLF"]
+        elif "internet retail" in ind or "e-commerce" in ind:
+            curated = ["AMZN", "SHOP", "MELI", "BABA"]
+        elif "banks" in ind or "banking" in ind:
+            curated = ["JPM", "BAC", "C", "WFC", "GS", "MS"]
+        elif "technology" in sec:
+            curated = ["MSFT", "GOOGL", "AMZN", "NVDA", "META", "ORCL", "ADBE"]
+        elif "communication" in sec:
+            curated = ["GOOGL", "META", "NFLX", "TTWO", "EA"]
+        elif "health" in sec:
+            curated = ["JNJ", "PFE", "MRK", "ABBV", "LLY"]
+        elif "energy" in sec:
+            curated = ["XOM", "CVX", "COP", "SLB", "HAL"]
+        else:
+            curated = ["MSFT", "GOOGL", "AMZN"]  # generic large-cap tech as last resort
+        peers = [p for p in curated if p != symbol][:limit]
+
+    # Basic cleanup
+    peers = [p for p in peers if TICKER_RE.match(p)]
+    return dedupe_keep_order(peers)
 
 # -------------------------- #
 #           SIDEBAR          #
 # -------------------------- #
 st.sidebar.title("🔎 Stock & Settings")
 ticker = st.sidebar.text_input("Primary Ticker (e.g., AAPL, MSFT, TSLA):", value="AAPL").upper().strip()
-peer_input = st.sidebar.text_input("Peer Tickers (comma-separated):", value="MSFT, GOOGL, AMZN")
-peers = [p.strip().upper() for p in peer_input.split(",") if p.strip()]
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("DCF Assumptions (Equity DCF / FCFE)")
@@ -151,7 +240,7 @@ terminal_growth = st.sidebar.number_input("Terminal growth (%)", value=2.5, step
 years_forecast = st.sidebar.slider("Forecast horizon (years)", 3, 10, 5)
 shares_override = st.sidebar.text_input("Shares Outstanding (override, in shares) [optional]:", value="")
 st.sidebar.markdown("---")
-st.sidebar.caption("Tip: Provide realistic peers for a stronger comparables section.")
+st.sidebar.caption("Tip: Add custom tickers in the Comparables section to refine peer set.")
 
 # -------------------------- #
 #         MAIN HEADER        #
@@ -435,7 +524,26 @@ st.write(desc)
 # -------------------------- #
 #         COMPARABLES        #
 # -------------------------- #
-st.header("📈 Comparables (User-Provided Peers)")
+st.header("📈 Comparables (Auto + Custom)")
+
+# Auto-detect peers for current ticker
+auto_suggestions = auto_peers_for_ticker(ticker, sector if sector != "—" else "", industry if industry != "—" else "")
+
+colp1, colp2 = st.columns([2, 1])
+with colp1:
+    st.caption("Suggested peers (same industry/sector). Unselect any you don't want.")
+    selected_auto = st.multiselect(
+        "Auto-detected peers",
+        options=auto_suggestions,
+        default=auto_suggestions[: min(6, len(auto_suggestions))]
+    )
+with colp2:
+    manual_peers_text = st.text_input("Add custom peers (comma-separated)", value="")
+    manual_peers = parse_manual_peers(manual_peers_text)
+
+# Final peer list (unique, ordered)
+peers = [p for p in dedupe_keep_order((selected_auto or []) + (manual_peers or [])) if p != ticker]
+
 def get_quick_snapshot(tix):
     t = yf.Ticker(tix)
     try:
@@ -568,7 +676,7 @@ if peers:
     else:
         st.info("No peer data could be fetched.")
 else:
-    st.info("Add peer tickers in the sidebar to enable comparables.")
+    st.info("Select peers from the auto-suggestions or add custom tickers above to enable comparables.")
 
 # -------------------------- #
 #     WHAT TO LOOK FOR       #
