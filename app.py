@@ -245,7 +245,7 @@ st.sidebar.caption("Tip: Add custom tickers in the Comparables section to refine
 # -------------------------- #
 #         MAIN HEADER        #
 # -------------------------- #
-st.title("📊 Company Analyzer & Valuation (Streamlit)")
+st.title("📊 Valuation & Comparable Automation")
 st.write(
     "Enter a ticker on the left, then explore financial statements, business overview, ratios, a detailed DCF, "
     "and comparables vs peers. Data source: Yahoo Finance via `yfinance`."
