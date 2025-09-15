@@ -530,7 +530,7 @@ st.write(desc)
 # -------------------------- #
 #         COMPARABLES        #
 # -------------------------- #
-st.header("📈 Comparables (Auto + Custom)")
+st.header("📈 Comparables")
 
 # Auto-detect peers for current ticker
 auto_suggestions = auto_peers_for_ticker(ticker, sector if sector != "—" else "", industry if industry != "—" else "")
