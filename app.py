@@ -247,7 +247,7 @@ st.sidebar.markdown(
 # -------------------------- #
 #         MAIN HEADER        #
 # -------------------------- #
-st.title("📊 Company Analyzer & Valuation (Streamlit)")
+st.title("📊 Stock Analysis & Valuation")
 # Top-right credit with LinkedIn
 st.markdown(
     '<div style="text-align:right;">'
