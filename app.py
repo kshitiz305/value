@@ -140,86 +140,198 @@ def parse_manual_peers(text: str):
     raw = [p.strip().upper() for p in text.split(",") if p.strip()]
     return [p for p in raw if TICKER_RE.match(p)]
 
-# ---------- Auto Peer Discovery (yahooquery + curated fallback) ----------
+# ---------- Industry normalization & synonyms ----------
+def _norm(s: str) -> str:
+    if not s:
+        return ""
+    s = s.lower()
+    s = s.replace("&", "and")
+    for ch in [",", "/", "-", "(", ")", ".", "'"]:
+        s = s.replace(ch, " ")
+    s = " ".join(s.split())
+    return s
+
+INDUSTRY_SYNONYMS = {
+    # Retail & Consumer Defensive
+    "discount stores": {"discount stores", "discount retail", "general merchandise stores", "hypermarkets and super centers", "warehouse clubs and superstores"},
+    "hypermarkets and super centers": {"hypermarkets and super centers", "discount stores", "general merchandise stores", "warehouse clubs and superstores"},
+    "grocery stores": {"grocery stores", "supermarkets", "food retailers", "food and staples retailing"},
+    "department stores": {"department stores"},
+    "drug retailers": {"drug retailers", "pharmacies and drug stores"},
+    "internet retail": {"internet retail", "e commerce", "internet and direct marketing retail"},
+    "packaged foods": {"packaged foods", "packaged foods and meats", "processed foods"},
+    "beverages non alcoholic": {"beverages non alcoholic", "non alcoholic beverages"},
+    "beverages breweries": {"beverages breweries", "brewers"},
+    "household and personal products": {"household and personal products"},
+    # Lodging / Casinos
+    "resorts and casinos": {"resorts and casinos", "casinos and gaming"},
+    "hotels and motels": {"hotels and motels", "lodging"},
+    # Tech buckets (kept tight)
+    "consumer electronics": {"consumer electronics", "computer hardware"},
+    "software infrastructure": {"software infrastructure", "software"},
+    "semiconductors": {"semiconductors", "semiconductor equipment and materials"},
+}
+
+def industry_matches(anchor_industry: str, candidate_industry: str) -> bool:
+    a = _norm(anchor_industry)
+    c = _norm(candidate_industry)
+    if not a or not c:
+        return False
+    if a == c:
+        return True
+    # synonym sets
+    for key, group in INDUSTRY_SYNONYMS.items():
+        if a in group and c in group:
+            return True
+    return False
+
+# ---------- Auto Peer Discovery (yahooquery + robust filtering + curated fallback) ----------
 @st.cache_resource(show_spinner=False)
 def auto_peers_for_ticker(symbol: str, sector: str, industry: str, limit: int = 12):
     """
-    Try to discover peers automatically:
-    1) Use yahooquery.search + asset_profile to filter same industry/sector.
-    2) Fall back to curated mapping by industry keywords.
+    Discover peers:
+    1) yahooquery.search on industry & synonyms; fetch asset_profile and filter by exact/synonym industry match.
+    2) If still insufficient, relax to same sector (exact).
+    3) If still insufficient, use curated lists keyed by industry/sector.
+    Always exclude the original symbol and dedupe.
     """
     peers = []
 
-    # Try yahooquery if available
-    try:
-        from yahooquery import search as yq_search
-        from yahooquery import Ticker as YQTicker
+    # Helper: try yahooquery search with multiple query terms, then filter strictly
+    def try_yq(industry_terms, sector_term, need_count):
+        syms = set()
+        try:
+            from yahooquery import search as yq_search
+            from yahooquery import Ticker as YQTicker
+        except Exception:
+            return []
 
-        query_term = industry or sector or symbol
-        if query_term:
-            res = yq_search(query_term, first=60)
-            syms = []
-            if isinstance(res, dict) and "quotes" in res:
-                for q in res["quotes"]:
-                    s = q.get("symbol")
-                    if not s:
-                        continue
-                    qt = q.get("quoteType", "").upper()
-                    if qt in ("EQUITY", "ETF", "MUTUALFUND"):
+        # Search by each industry term
+        try:
+            for term in industry_terms:
+                if not term:
+                    continue
+                res = yq_search(term, first=80)
+                if isinstance(res, dict) and "quotes" in res:
+                    for q in res["quotes"]:
+                        s = q.get("symbol")
+                        qt = str(q.get("quoteType", "")).upper()
+                        if not s or qt not in ("EQUITY", "ETF", "MUTUALFUND"):
+                            continue
                         s = s.upper()
                         if TICKER_RE.match(s):
-                            syms.append(s)
-            if syms:
-                yq = YQTicker(list(set(syms[:120])), asynchronous=True)
-                prof = yq.asset_profile
-                same_ind = []
-                if industry:
-                    ind_lower = industry.lower()
-                    for s, dat in prof.items():
-                        if isinstance(dat, dict) and str(dat.get("industry", "")).lower() == ind_lower:
-                            same_ind.append(s)
-                if not same_ind and sector:
-                    sec_lower = sector.lower()
-                    for s, dat in prof.items():
-                        if isinstance(dat, dict) and str(dat.get("sector", "")).lower() == sec_lower:
-                            same_ind.append(s)
-                peers = [s for s in same_ind if s != symbol][:limit]
-    except Exception:
-        peers = []
+                            syms.add(s)
+        except Exception:
+            pass
 
-    # Curated fallback
-    if not peers:
-        ind = (industry or "").lower()
-        sec = (sector or "").lower()
-        curated = []
-        if ("casino" in ind) or ("gaming" in ind):
-            curated = ["MGM", "LVS", "CZR", "MLCO", "PENN", "BALY"]
-        elif "hotels" in ind or "resorts" in ind or "lodging" in ind:
-            curated = ["MAR", "HLT", "H", "IHG", "HGV"]
-        elif "semiconductor" in ind:
-            curated = ["NVDA", "AMD", "INTC", "AVGO", "QCOM", "TXN", "MU"]
-        elif "software" in ind:
-            curated = ["MSFT", "ADBE", "CRM", "ORCL", "NOW", "INTU"]
-        elif "consumer electronics" in ind or "hardware" in ind:
-            curated = ["AAPL", "HPQ", "DELL", "SSNLF"]
-        elif "internet retail" in ind or "e-commerce" in ind:
-            curated = ["AMZN", "SHOP", "MELI", "BABA"]
-        elif "banks" in ind or "banking" in ind:
-            curated = ["JPM", "BAC", "C", "WFC", "GS", "MS"]
-        elif "technology" in sec:
-            curated = ["MSFT", "GOOGL", "AMZN", "NVDA", "META", "ORCL", "ADBE"]
-        elif "communication" in sec:
-            curated = ["GOOGL", "META", "NFLX", "TTWO", "EA"]
-        elif "health" in sec:
-            curated = ["JNJ", "PFE", "MRK", "ABBV", "LLY"]
-        elif "energy" in sec:
-            curated = ["XOM", "CVX", "COP", "SLB", "HAL"]
-        else:
-            curated = ["MSFT", "GOOGL", "AMZN"]
-        peers = [p for p in curated if p != symbol][:limit]
+        if not syms:
+            return []
 
-    peers = [p for p in peers if TICKER_RE.match(p)]
-    return dedupe_keep_order(peers)
+        # Fetch profiles and filter
+        try:
+            yq = YQTicker(list(syms)[:150], asynchronous=True)
+            prof = yq.asset_profile
+        except Exception:
+            prof = {}
+
+        same_ind = []
+        same_sector = []
+        for s, dat in prof.items():
+            if not isinstance(dat, dict):
+                continue
+            cand_ind = str(dat.get("industry", ""))
+            cand_sec = str(dat.get("sector", ""))
+            if industry and industry_matches(industry, cand_ind):
+                same_ind.append(s)
+            elif sector_term and _norm(cand_sec) == _norm(sector_term):
+                same_sector.append(s)
+
+        # Prefer industry matches, fall back to sector
+        out = [x for x in same_ind if x != symbol]
+        if len(out) < need_count:
+            # augment with sector matches (excluding anything with clearly different industries like tech when anchor is consumer defensive)
+            out += [x for x in same_sector if x != symbol and x not in out]
+        return out[:limit]
+
+    # 1) Strict by industry (with synonyms)
+    industry_terms = [industry]
+    # add synonyms for broader capture
+    for k, group in INDUSTRY_SYNONYMS.items():
+        if _norm(industry) in group:
+            industry_terms.extend(group)
+            break
+
+    found = try_yq(industry_terms, sector, need_count=limit)
+    if found:
+        peers = found
+
+    # 2) If still thin, try sector-only pass (kept tight)
+    if not peers or len(peers) < 3:
+        sector_pass = try_yq([sector], sector, need_count=limit)
+        # Ensure sector-only additions actually share sector exactly
+        sector_pass = [p for p in sector_pass if p not in peers]
+        peers += sector_pass
+        peers = peers[:limit]
+
+    # 3) Curated fallback (industry-first, then sector)
+    if not peers or len(peers) < 3:
+        peers += curated_fallback(symbol, sector, industry)
+        peers = dedupe_keep_order(peers)[:limit]
+
+    # basic clean-up
+    peers = [p for p in peers if TICKER_RE.match(p) and p != symbol]
+    return dedupe_keep_order(peers)[:limit]
+
+def curated_fallback(symbol: str, sector: str, industry: str) -> list:
+    """Curated lists for common categories to avoid unrelated picks."""
+    aind = _norm(industry)
+    asec = _norm(sector)
+    # Retail / Consumer Defensive specifics
+    if industry_matches("discount stores", aind) or industry_matches("hypermarkets and super centers", aind):
+        return [x for x in ["COST", "TGT", "DG", "DLTR", "BJ"] if x != symbol]
+    if industry_matches("grocery stores", aind):
+        return [x for x in ["KR", "ACI", "SFM", "GO", "IMKTA", "CASY"] if x != symbol]
+    if industry_matches("drug retailers", aind):
+        return [x for x in ["WBA", "CVS", "RAD"] if x != symbol]
+    if industry_matches("internet retail", aind):
+        return [x for x in ["AMZN", "SHOP", "MELI", "BABA"] if x != symbol]
+    if industry_matches("packaged foods", aind):
+        return [x for x in ["GIS", "K", "KHC", "CAG", "MDLZ", "HSY"] if x != symbol]
+    if industry_matches("beverages non alcoholic", aind):
+        return [x for x in ["KO", "PEP", "KDP", "MNST"] if x != symbol]
+    if industry_matches("household and personal products", aind):
+        return [x for x in ["PG", "CL", "KMB", "CLX", "CHD"] if x != symbol]
+
+    # Lodging / Casinos
+    if industry_matches("resorts and casinos", aind):
+        return [x for x in ["MGM", "LVS", "CZR", "MLCO", "PENN", "BALY"] if x != symbol]
+    if industry_matches("hotels and motels", aind):
+        return [x for x in ["MAR", "HLT", "H", "IHG", "HGV"] if x != symbol]
+
+    # Tech (keep aligned)
+    if industry_matches("semiconductors", aind):
+        return [x for x in ["NVDA", "AMD", "INTC", "AVGO", "QCOM", "TXN", "MU"] if x != symbol]
+    if industry_matches("software infrastructure", aind):
+        return [x for x in ["MSFT", "ADBE", "ORCL", "CRM", "NOW", "INTU"] if x != symbol]
+    if industry_matches("consumer electronics", aind):
+        return [x for x in ["AAPL", "HPQ", "DELL", "SSNLF"] if x != symbol]
+
+    # Sector-level guardrails (last resort; avoids tech for WMT etc.)
+    if asec == _norm("Consumer Defensive"):
+        return [x for x in ["COST", "TGT", "KR", "DG", "DLTR", "BJ"] if x != symbol]
+    if asec == _norm("Consumer Cyclical"):
+        return [x for x in ["HD", "LOW", "ROST", "TJX", "M", "KSS"] if x != symbol]
+    if asec == _norm("Technology"):
+        return [x for x in ["MSFT", "GOOGL", "NVDA", "META", "ORCL", "ADBE"] if x != symbol]
+    if asec == _norm("Communication Services"):
+        return [x for x in ["GOOGL", "META", "NFLX", "TTWO", "EA"] if x != symbol]
+    if asec == _norm("Healthcare"):
+        return [x for x in ["JNJ", "PFE", "MRK", "ABBV", "LLY"] if x != symbol]
+    if asec == _norm("Energy"):
+        return [x for x in ["XOM", "CVX", "COP", "SLB", "HAL"] if x != symbol]
+
+    # Very last: nothing unrelated
+    return []
 
 # -------------------------- #
 #           SIDEBAR          #
@@ -238,7 +350,7 @@ terminal_growth = st.sidebar.number_input("Terminal growth (%)", value=2.5, step
 years_forecast = st.sidebar.slider("Forecast horizon (years)", 3, 10, 5)
 shares_override = st.sidebar.text_input("Shares Outstanding (override, in shares) [optional]:", value="")
 st.sidebar.markdown("---")
-st.sidebar.caption("Tip: Add custom tickers in the Comparables section to refine peer set.")
+st.sidebar.caption("Tip: Add or remove peers in the Comparables section to refine the set.")
 st.sidebar.markdown(
     '[👤 Built by **Navjot Dhah**](https://www.linkedin.com/in/navjot-dhah-57870b238)',
     unsafe_allow_html=True
@@ -247,7 +359,7 @@ st.sidebar.markdown(
 # -------------------------- #
 #         MAIN HEADER        #
 # -------------------------- #
-st.title("📊 Stock Analysis & Valuation")
+st.title("📊 Company Analyzer & Valuation (Streamlit)")
 # Top-right credit with LinkedIn
 st.markdown(
     '<div style="text-align:right;">'
@@ -475,7 +587,7 @@ if fcfe_ttm==fcfe_ttm and shares:
     proj = project_fcfe(fcfe_ttm, start_fcfe_growth, years_forecast)
     # Terminal value (Gordon on Year N FCFE)
     g_t = terminal_growth/100.0
-    ke = max(cost_equity, g_t + 0.0001)
+    ke = max(cost_equity, g_t + 0.0001)  # avoid div by zero/negative spread
     tv = proj[-1] * (1.0 + g_t) / (ke - g_t)
 
     years = np.arange(1, years_forecast+1)
@@ -530,14 +642,18 @@ st.write(desc)
 # -------------------------- #
 #         COMPARABLES        #
 # -------------------------- #
-st.header("📈 Comparables")
+st.header("📈 Comparables (Auto + Custom)")
 
-# Auto-detect peers for current ticker
-auto_suggestions = auto_peers_for_ticker(ticker, sector if sector != "—" else "", industry if industry != "—" else "")
+# Auto-detect peers for current ticker — now strictly same industry, then sector; curated fallback avoids unrelated picks
+auto_suggestions = auto_peers_for_ticker(
+    ticker,
+    sector if sector and sector != "—" else "",
+    industry if industry and industry != "—" else ""
+)
 
 colp1, colp2 = st.columns([2, 1])
 with colp1:
-    st.caption("Suggested peers (same industry/sector). Unselect any you don't want.")
+    st.caption("Suggested peers (same industry preferred; sector as fallback). Unselect any you don't want.")
     selected_auto = st.multiselect(
         "Auto-detected peers",
         options=auto_suggestions,
