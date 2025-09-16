@@ -800,7 +800,7 @@ else:
 # -------------------------- #
 #     WHAT TO LOOK FOR       #
 # -------------------------- #
-st.header("🧭 How to Read This Company Through Its Financials")
+st.header("🧭 Basics Of Reading Financials ")
 st.markdown(
 """
 **Income Statement**: Track whether revenue, gross profit, and operating income grow together. Persistent margin expansion signals operating leverage.
@@ -815,4 +815,4 @@ st.markdown(
 """
 )
 
-st.caption("Disclaimer: Educational tool. Data can be incomplete/inaccurate. Always verify against company filings before making decisions.")
+st.caption("Disclaimer: Educational tool. Data can be incomplete/inaccurate. Always verify against company filings. ")
