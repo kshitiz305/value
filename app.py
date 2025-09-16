@@ -359,7 +359,7 @@ st.sidebar.markdown(
 # -------------------------- #
 #         MAIN HEADER        #
 # -------------------------- #
-st.title("📊 Company Analyzer & Valuation (Streamlit)")
+st.title("📊 Company Analyzer & Valuation ")
 # Top-right credit with LinkedIn
 st.markdown(
     '<div style="text-align:right;">'
@@ -642,7 +642,7 @@ st.write(desc)
 # -------------------------- #
 #         COMPARABLES        #
 # -------------------------- #
-st.header("📈 Comparables (Auto + Custom)")
+st.header("📈 Comparables ")
 
 # Auto-detect peers for current ticker — now strictly same industry, then sector; curated fallback avoids unrelated picks
 auto_suggestions = auto_peers_for_ticker(
